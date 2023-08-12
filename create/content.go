@@ -95,7 +95,7 @@ func NewContent(h *hugolib.HugoSites, kind, targetPath string, force bool) error
 		}
 
 		if ext == "" {
-			return "", fmt.Errorf("failed to resolve %q to a archetype template", targetPath)
+			return "", fmt.Errorf("failed to resolve %q to an archetype template", targetPath)
 		}
 
 		if !files.IsContentFile(b.targetPath) {
@@ -340,7 +340,7 @@ func (b *contentBuilder) mapArcheTypeDir() error {
 }
 
 func (b *contentBuilder) openInEditorIfConfigured(filename string) error {
-	editor := b.h.Cfg.GetString("newContentEditor")
+	editor := b.h.Conf.NewContentEditor()
 	if editor == "" {
 		return nil
 	}
