@@ -14,8 +14,10 @@
 package minifier
 
 import (
+	"context"
 	"testing"
 
+	"github.com/gohugoio/hugo/config/testconfig"
 	"github.com/gohugoio/hugo/resources/resource"
 
 	qt "github.com/frankban/quicktest"
@@ -25,18 +27,18 @@ import (
 func TestTransform(t *testing.T) {
 	c := qt.New(t)
 
-	spec, err := htesting.NewTestResourceSpec()
-	c.Assert(err, qt.IsNil)
-	client, _ := New(spec)
+	d := testconfig.GetTestDeps(nil, nil)
+	t.Cleanup(func() { c.Assert(d.Close(), qt.IsNil) })
 
-	r, err := htesting.NewResourceTransformerForSpec(spec, "hugo.html", "<h1>   Hugo Rocks!   </h1>")
+	client, _ := New(d.ResourceSpec)
+	r, err := htesting.NewResourceTransformerForSpec(d.ResourceSpec, "hugo.html", "<h1>   Hugo Rocks!   </h1>")
 	c.Assert(err, qt.IsNil)
 
 	transformed, err := client.Minify(r)
 	c.Assert(err, qt.IsNil)
 
 	c.Assert(transformed.RelPermalink(), qt.Equals, "/hugo.min.html")
-	content, err := transformed.(resource.ContentProvider).Content()
+	content, err := transformed.(resource.ContentProvider).Content(context.Background())
 	c.Assert(err, qt.IsNil)
 	c.Assert(content, qt.Equals, "<h1>Hugo Rocks!</h1>")
 }

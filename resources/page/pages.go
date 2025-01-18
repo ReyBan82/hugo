@@ -66,9 +66,7 @@ func ToPages(seq any) (Pages, error) {
 		return v.Pages, nil
 	case []Page:
 		pages := make(Pages, len(v))
-		for i, vv := range v {
-			pages[i] = vv
-		}
+		copy(pages, v)
 		return pages, nil
 	case []any:
 		pages := make(Pages, len(v))
@@ -130,21 +128,6 @@ func (pages Pages) ProbablyEq(other any) bool {
 	}
 
 	return true
-}
-
-func (ps Pages) removeFirstIfFound(p Page) Pages {
-	ii := -1
-	for i, pp := range ps {
-		if p.Eq(pp) {
-			ii = i
-			break
-		}
-	}
-
-	if ii != -1 {
-		ps = append(ps[:ii], ps[ii+1:]...)
-	}
-	return ps
 }
 
 // PagesFactory somehow creates some Pages.

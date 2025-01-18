@@ -11,57 +11,57 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package openapi3 provides functions for generating OpenAPI v3 (Swagger) documentation.
 package openapi3
 
 import (
+	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 
 	gyaml "github.com/ghodss/yaml"
 
-	"errors"
-
 	kopenapi3 "github.com/getkin/kin-openapi/openapi3"
-	"github.com/gohugoio/hugo/cache/namedmemcache"
+	"github.com/gohugoio/hugo/cache/dynacache"
 	"github.com/gohugoio/hugo/deps"
+	"github.com/gohugoio/hugo/identity"
 	"github.com/gohugoio/hugo/parser/metadecoders"
 	"github.com/gohugoio/hugo/resources/resource"
 )
 
 // New returns a new instance of the openapi3-namespaced template functions.
 func New(deps *deps.Deps) *Namespace {
-	// TODO(bep) consolidate when merging that "other branch" -- but be aware of the keys.
-	cache := namedmemcache.New()
-	deps.BuildStartListeners.Add(
-		func() {
-			cache.Clear()
-		})
-
 	return &Namespace{
-		cache: cache,
+		cache: dynacache.GetOrCreatePartition[string, *OpenAPIDocument](deps.MemCache, "/tmpl/openapi3", dynacache.OptionsPartition{Weight: 30, ClearWhen: dynacache.ClearOnChange}),
 		deps:  deps,
 	}
 }
 
 // Namespace provides template functions for the "openapi3".
 type Namespace struct {
-	cache *namedmemcache.Cache
+	cache *dynacache.Partition[string, *OpenAPIDocument]
 	deps  *deps.Deps
 }
 
 // OpenAPIDocument represents an OpenAPI 3 document.
 type OpenAPIDocument struct {
 	*kopenapi3.T
+	identityGroup identity.Identity
 }
 
+func (o *OpenAPIDocument) GetIdentityGroup() identity.Identity {
+	return o.identityGroup
+}
+
+// Unmarshal unmarshals the given resource into an OpenAPI 3 document.
 func (ns *Namespace) Unmarshal(r resource.UnmarshableResource) (*OpenAPIDocument, error) {
 	key := r.Key()
 	if key == "" {
 		return nil, errors.New("no Key set in Resource")
 	}
 
-	v, err := ns.cache.GetOrCreate(key, func() (any, error) {
-		f := metadecoders.FormatFromMediaType(r.MediaType())
+	v, err := ns.cache.GetOrCreate(key, func(string) (*OpenAPIDocument, error) {
+		f := metadecoders.FormatFromStrings(r.MediaType().Suffixes()...)
 		if f == "" {
 			return nil, fmt.Errorf("MIME %q not supported", r.MediaType())
 		}
@@ -72,7 +72,7 @@ func (ns *Namespace) Unmarshal(r resource.UnmarshableResource) (*OpenAPIDocument
 		}
 		defer reader.Close()
 
-		b, err := ioutil.ReadAll(reader)
+		b, err := io.ReadAll(reader)
 		if err != nil {
 			return nil, err
 		}
@@ -90,11 +90,11 @@ func (ns *Namespace) Unmarshal(r resource.UnmarshableResource) (*OpenAPIDocument
 
 		err = kopenapi3.NewLoader().ResolveRefsIn(s, nil)
 
-		return &OpenAPIDocument{T: s}, err
+		return &OpenAPIDocument{T: s, identityGroup: identity.FirstIdentity(r)}, err
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	return v.(*OpenAPIDocument), nil
+	return v, nil
 }

@@ -14,6 +14,7 @@
 package hugolib
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -21,9 +22,9 @@ import (
 	"testing"
 
 	"github.com/gohugoio/hugo/config"
+	"github.com/gohugoio/hugo/resources/kinds"
 
 	"github.com/gohugoio/hugo/parser/pageparser"
-	"github.com/gohugoio/hugo/resources/page"
 
 	qt "github.com/frankban/quicktest"
 )
@@ -109,7 +110,7 @@ title: "Shortcodes Galore!"
 
 			p, err := pageparser.ParseMain(strings.NewReader(test.input), pageparser.Config{})
 			c.Assert(err, qt.IsNil)
-			handler := newShortcodeHandler(nil, s)
+			handler := newShortcodeHandler("", s)
 			iter := p.Iterator()
 
 			short, err := handler.extractShortcode(0, 0, p.Input(), iter)
@@ -125,9 +126,10 @@ func TestShortcodeMultipleOutputFormats(t *testing.T) {
 	siteConfig := `
 baseURL = "http://example.com/blog"
 
-paginate = 1
-
 disableKinds = ["section", "term", "taxonomy", "RSS", "sitemap", "robotsTXT", "404"]
+
+[pagination]
+pagerSize = 1
 
 [outputs]
 home = [ "HTML", "AMP", "Calendar" ]
@@ -185,7 +187,7 @@ CSV: {{< myShort >}}
 	b.Assert(len(h.Sites), qt.Equals, 1)
 
 	s := h.Sites[0]
-	home := s.getPage(page.KindHome)
+	home := s.getPageOldVersion(kinds.KindHome)
 	b.Assert(home, qt.Not(qt.IsNil))
 	b.Assert(len(home.OutputFormats()), qt.Equals, 3)
 
@@ -247,7 +249,7 @@ CSV: {{< myShort >}}
 func BenchmarkReplaceShortcodeTokens(b *testing.B) {
 	type input struct {
 		in           []byte
-		replacements map[string]string
+		tokenHandler func(ctx context.Context, token string) ([]byte, error)
 		expect       []byte
 	}
 
@@ -263,22 +265,30 @@ func BenchmarkReplaceShortcodeTokens(b *testing.B) {
 		{strings.Repeat("A ", 3000) + " HAHAHUGOSHORTCODE-1HBHB." + strings.Repeat("BC ", 1000) + " HAHAHUGOSHORTCODE-1HBHB.", map[string]string{"HAHAHUGOSHORTCODE-1HBHB": "Hello World"}, []byte(strings.Repeat("A ", 3000) + " Hello World." + strings.Repeat("BC ", 1000) + " Hello World.")},
 	}
 
-	in := make([]input, b.N*len(data))
 	cnt := 0
+	in := make([]input, b.N*len(data))
 	for i := 0; i < b.N; i++ {
 		for _, this := range data {
-			in[cnt] = input{[]byte(this.input), this.replacements, this.expect}
+			replacements := make(map[string]shortcodeRenderer)
+			for k, v := range this.replacements {
+				replacements[k] = prerenderedShortcode{s: v}
+			}
+			tokenHandler := func(ctx context.Context, token string) ([]byte, error) {
+				return []byte(this.replacements[token]), nil
+			}
+			in[cnt] = input{[]byte(this.input), tokenHandler, this.expect}
 			cnt++
 		}
 	}
 
 	b.ResetTimer()
 	cnt = 0
+	ctx := context.Background()
 	for i := 0; i < b.N; i++ {
 		for j := range data {
 			currIn := in[cnt]
 			cnt++
-			results, err := replaceShortcodeTokens(currIn.in, currIn.replacements)
+			results, err := expandShortcodeTokens(ctx, currIn.in, currIn.tokenHandler)
 			if err != nil {
 				b.Fatalf("[%d] failed: %s", i, err)
 				continue
@@ -383,7 +393,16 @@ func TestReplaceShortcodeTokens(t *testing.T) {
 		},
 	} {
 
-		results, err := replaceShortcodeTokens([]byte(this.input), this.replacements)
+		replacements := make(map[string]shortcodeRenderer)
+		for k, v := range this.replacements {
+			replacements[k] = prerenderedShortcode{s: v}
+		}
+		tokenHandler := func(ctx context.Context, token string) ([]byte, error) {
+			return []byte(this.replacements[token]), nil
+		}
+
+		ctx := context.Background()
+		results, err := expandShortcodeTokens(ctx, []byte(this.input), tokenHandler)
 
 		if b, ok := this.expect.(bool); ok && !b {
 			if err == nil {
@@ -581,7 +600,7 @@ weight: %d
 	c.Assert(len(s.RegularPages()), qt.Equals, 3)
 
 	builder.AssertFileContent("public/en/p1/index.html", `v1: 0 sgo: |v2: 1 sgo: 0|v3: 2 sgo: 1|v4: 3 sgo: 2|v5: 4 sgo: 3`)
-	builder.AssertFileContent("public/en/p1/index.html", `outer ordinal: 5 inner: 
+	builder.AssertFileContent("public/en/p1/index.html", `outer ordinal: 5 inner:
 ordinal: 0 scratch ordinal: 1 scratch get ordinal: 0
 ordinal: 2 scratch ordinal: 3 scratch get ordinal: 2
 ordinal: 4 scratch ordinal: 5 scratch get ordinal: 4`)
@@ -736,41 +755,17 @@ title: "Hugo Rocks!"
 	)
 }
 
-// https://github.com/gohugoio/hugo/issues/6504
-func TestShortcodeEmoji(t *testing.T) {
-	t.Parallel()
-
-	v := config.NewWithTestDefaults()
-	v.Set("enableEmoji", true)
-
-	builder := newTestSitesBuilder(t).WithViper(v)
-
-	builder.WithContent("page.md", `---
-title: "Hugo Rocks!"
----
-
-# doc
-
-{{< event >}}10:30-11:00 My :smile: Event {{< /event >}}
-
-
-`).WithTemplatesAdded(
-		"layouts/shortcodes/event.html", `<div>{{ "\u29BE" }} {{ .Inner }} </div>`)
-
-	builder.Build(BuildCfg{})
-	builder.AssertFileContent("public/page/index.html",
-		"⦾ 10:30-11:00 My 😄 Event",
-	)
-}
-
 func TestShortcodeParams(t *testing.T) {
 	t.Parallel()
-	c := qt.New(t)
 
-	builder := newTestSitesBuilder(t).WithSimpleConfigFile()
-
-	builder.WithContent("page.md", `---
+	files := `
+-- hugo.toml --
+baseURL = "https://example.org"
+-- layouts/shortcodes/hello.html --
+{{ range $i, $v := .Params }}{{ printf "- %v: %v (%T) " $i $v $v -}}{{ end }}
+-- content/page.md --
 title: "Hugo Rocks!"
+summary: "Foo"
 ---
 
 # doc
@@ -779,23 +774,15 @@ types positional: {{< hello true false 33 3.14 >}}
 types named: {{< hello b1=true b2=false i1=33 f1=3.14 >}}
 types string: {{< hello "true" trues "33" "3.14" >}}
 escaped quoute: {{< hello "hello \"world\"." >}}
+-- layouts/_default/single.html --
+Content: {{ .Content }}|
+`
 
+	b := Test(t, files)
 
-`).WithTemplatesAdded(
-		"layouts/shortcodes/hello.html",
-		`{{ range $i, $v := .Params }}
--  {{ printf "%v: %v (%T)" $i $v $v }}
-{{ end }}
-{{ $b1 := .Get "b1" }}
-Get: {{ printf "%v (%T)" $b1 $b1 | safeHTML }}
-`).Build(BuildCfg{})
-
-	s := builder.H.Sites[0]
-	c.Assert(len(s.RegularPages()), qt.Equals, 1)
-
-	builder.AssertFileContent("public/page/index.html",
+	b.AssertFileContent("public/page/index.html",
 		"types positional: - 0: true (bool) - 1: false (bool) - 2: 33 (int) - 3: 3.14 (float64)",
-		"types named: - b1: true (bool) - b2: false (bool) - f1: 3.14 (float64) - i1: 33 (int) Get: true (bool) ",
+		"types named: - b1: true (bool) - b2: false (bool) - f1: 3.14 (float64) - i1: 33 (int)",
 		"types string: - 0: true (string) - 1: trues (string) - 2: 33 (string) - 3: 3.14 (string) ",
 		"hello &#34;world&#34;. (string)",
 	)
@@ -804,7 +791,7 @@ Get: {{ printf "%v (%T)" $b1 $b1 | safeHTML }}
 func TestShortcodeRef(t *testing.T) {
 	t.Parallel()
 
-	v := config.NewWithTestDefaults()
+	v := config.New()
 	v.Set("baseURL", "https://example.org")
 
 	builder := newTestSitesBuilder(t).WithViper(v)
@@ -838,7 +825,6 @@ title: "Hugo Rocks!"
 <h2 id="doc">Doc</h2>
 `,
 	)
-
 }
 
 // https://github.com/gohugoio/hugo/issues/6857
@@ -857,7 +843,7 @@ title: "No Inner!"
 		"layouts/shortcodes/noinner.html", `No inner here.`)
 
 	err := b.BuildE(BuildCfg{})
-	b.Assert(err.Error(), qt.Contains, filepath.FromSlash(`"content/mypage.md:4:21": failed to extract shortcode: shortcode "noinner" has no .Inner, yet a closing tag was provided`))
+	b.Assert(err.Error(), qt.Contains, filepath.FromSlash(`"content/mypage.md:4:16": failed to extract shortcode: shortcode "noinner" does not evaluate .Inner or .InnerDeindent, yet a closing tag was provided`))
 }
 
 func TestShortcodeStableOutputFormatTemplates(t *testing.T) {
@@ -917,6 +903,7 @@ func TestShortcodeMarkdownOutputFormat(t *testing.T) {
 title: "p1"
 ---
 {{< foo >}}
+# The below would have failed using the HTML template parser.
 -- layouts/shortcodes/foo.md --
 §§§
 <x
@@ -925,18 +912,11 @@ title: "p1"
 {{ .Content }}
 `
 
-	b := NewIntegrationTestBuilder(
-		IntegrationTestConfig{
-			T:           t,
-			TxtarString: files,
-			Running:     true,
-		},
-	).Build()
+	b := Test(t, files)
 
 	b.AssertFileContent("public/p1/index.html", `
 <x
 	`)
-
 }
 
 func TestShortcodePreserveIndentation(t *testing.T) {
@@ -968,16 +948,9 @@ title: "p1"
 {{ .Content }}
 `
 
-	b := NewIntegrationTestBuilder(
-		IntegrationTestConfig{
-			T:           t,
-			TxtarString: files,
-			Running:     true,
-		},
-	).Build()
+	b := Test(t, files)
 
 	b.AssertFileContent("public/p1/index.html", "<ol>\n<li>\n<p>List 1</p>\n<ol>\n<li>Item Mark1 1</li>\n<li>Item Mark1 2</li>\n<li>Item Mark2 1</li>\n<li>Item Mark2 2\n<ol>\n<li>Item Mark2 2-1</li>\n</ol>\n</li>\n<li>Item Mark2 3</li>\n</ol>\n</li>\n</ol>")
-
 }
 
 func TestShortcodeCodeblockIndent(t *testing.T) {
@@ -1000,16 +973,9 @@ echo "foo";
 {{ .Content }}
 `
 
-	b := NewIntegrationTestBuilder(
-		IntegrationTestConfig{
-			T:           t,
-			TxtarString: files,
-			Running:     true,
-		},
-	).Build()
+	b := Test(t, files)
 
 	b.AssertFileContent("public/p1/index.html", "<pre><code>echo &quot;foo&quot;;\n</code></pre>")
-
 }
 
 func TestShortcodeHighlightDeindent(t *testing.T) {
@@ -1038,13 +1004,7 @@ title: "p1"
 {{ .Content }}
 `
 
-	b := NewIntegrationTestBuilder(
-		IntegrationTestConfig{
-			T:           t,
-			TxtarString: files,
-			Running:     true,
-		},
-	).Build()
+	b := Test(t, files)
 
 	b.AssertFileContent("public/p1/index.html", `
 <pre><code> <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-bash" data-lang="bash"><span class="line"><span class="cl">line 1<span class="p">;</span>
@@ -1053,7 +1013,6 @@ title: "p1"
 </code></pre>
 
 	`)
-
 }
 
 // Issue 10236.
@@ -1079,13 +1038,12 @@ Title: {{ .Get "title" | safeHTML }}
 		IntegrationTestConfig{
 			T:           t,
 			TxtarString: files,
-			Running:     true,
-			Verbose:     true,
+
+			Verbose: true,
 		},
 	).Build()
 
 	b.AssertFileContent("public/p1/index.html", `Title: Steve "Francia".`)
-
 }
 
 // Issue 10391.
@@ -1172,11 +1130,124 @@ C'est un test
 		IntegrationTestConfig{
 			T:           t,
 			TxtarString: files,
-			Running:     true,
-			Verbose:     true,
+
+			Verbose: true,
 		},
 	).Build()
 
 	b.AssertFileContent("public/fr/p2/index.html", `plus-dinformations`)
+}
 
+// Issue 10671.
+func TestShortcodeInnerShouldBeEmptyWhenNotClosed(t *testing.T) {
+	t.Parallel()
+
+	files := `
+-- config.toml --
+disableKinds = ["home", "taxonomy", "term"]
+-- content/p1.md --
+---
+title: "p1"
+---
+
+{{< sc "self-closing" />}}
+
+Text.
+
+{{< sc "closing-no-newline" >}}{{< /sc >}}
+
+-- layouts/shortcodes/sc.html --
+Inner: {{ .Get 0 }}: {{ len .Inner }}
+InnerDeindent: {{ .Get 0 }}: {{ len .InnerDeindent }}
+-- layouts/_default/single.html --
+{{ .Content }}
+`
+
+	b := NewIntegrationTestBuilder(
+		IntegrationTestConfig{
+			T:           t,
+			TxtarString: files,
+
+			Verbose: true,
+		},
+	).Build()
+
+	b.AssertFileContent("public/p1/index.html", `
+Inner: self-closing: 0
+InnerDeindent: self-closing: 0
+Inner: closing-no-newline: 0
+InnerDeindent: closing-no-newline: 0
+
+`)
+}
+
+// Issue 10675.
+func TestShortcodeErrorWhenItShouldBeClosed(t *testing.T) {
+	t.Parallel()
+
+	files := `
+-- config.toml --
+disableKinds = ["home", "taxonomy", "term"]
+-- content/p1.md --
+---
+title: "p1"
+---
+
+{{< sc >}}
+
+Text.
+
+-- layouts/shortcodes/sc.html --
+Inner: {{ .Get 0 }}: {{ len .Inner }}
+-- layouts/_default/single.html --
+{{ .Content }}
+`
+
+	b, err := NewIntegrationTestBuilder(
+		IntegrationTestConfig{
+			T:           t,
+			TxtarString: files,
+
+			Verbose: true,
+		},
+	).BuildE()
+
+	b.Assert(err, qt.Not(qt.IsNil))
+	b.Assert(err.Error(), qt.Contains, `p1.md:5:1": failed to extract shortcode: shortcode "sc" must be closed or self-closed`)
+}
+
+// Issue 10819.
+func TestShortcodeInCodeFenceHyphen(t *testing.T) {
+	t.Parallel()
+
+	files := `
+-- config.toml --
+disableKinds = ["home", "taxonomy", "term"]
+-- content/p1.md --
+---
+title: "p1"
+---
+
+§§§go
+{{< sc >}}
+§§§
+
+Text.
+
+-- layouts/shortcodes/sc.html --
+Hello.
+-- layouts/_default/single.html --
+{{ .Content }}
+`
+
+	b := NewIntegrationTestBuilder(
+		IntegrationTestConfig{
+			T:           t,
+			TxtarString: files,
+
+			Verbose: true,
+		},
+	).Build()
+
+	b.AssertFileContent("public/p1/index.html", "<span style=\"color:#a6e22e\">Hello.</span>")
 }

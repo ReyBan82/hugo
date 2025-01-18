@@ -17,19 +17,18 @@ package partials
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"html/template"
 	"io"
-	"io/ioutil"
-	"reflect"
 	"strings"
-	"sync"
 	"time"
 
-	texttemplate "github.com/gohugoio/hugo/tpl/internal/go_templates/texttemplate"
+	"github.com/bep/lazycache"
 
-	"github.com/gohugoio/hugo/helpers"
+	"github.com/gohugoio/hugo/common/hashing"
+	"github.com/gohugoio/hugo/identity"
+
+	texttemplate "github.com/gohugoio/hugo/tpl/internal/go_templates/texttemplate"
 
 	"github.com/gohugoio/hugo/tpl"
 
@@ -37,40 +36,54 @@ import (
 	"github.com/gohugoio/hugo/deps"
 )
 
-// TestTemplateProvider is global deps.ResourceProvider.
-// NOTE: It's currently unused.
-var TestTemplateProvider deps.ResourceProvider
-
 type partialCacheKey struct {
-	name    string
-	variant any
+	Name     string
+	Variants []any
+}
+type includeResult struct {
+	name     string
+	result   any
+	mangager identity.Manager
+	err      error
+}
+
+func (k partialCacheKey) Key() string {
+	if k.Variants == nil {
+		return k.Name
+	}
+	return hashing.HashString(append([]any{k.Name}, k.Variants...)...)
 }
 
 func (k partialCacheKey) templateName() string {
-	if !strings.HasPrefix(k.name, "partials/") {
-		return "partials/" + k.name
+	if !strings.HasPrefix(k.Name, "partials/") {
+		return "partials/" + k.Name
 	}
-	return k.name
+	return k.Name
 }
 
-// partialCache represents a cache of partials protected by a mutex.
+// partialCache represents a LRU cache of partials.
 type partialCache struct {
-	sync.RWMutex
-	p map[partialCacheKey]any
+	cache *lazycache.Cache[string, includeResult]
 }
 
 func (p *partialCache) clear() {
-	p.Lock()
-	defer p.Unlock()
-	p.p = make(map[partialCacheKey]any)
+	p.cache.DeleteFunc(func(s string, r includeResult) bool {
+		return true
+	})
 }
 
 // New returns a new instance of the templates-namespaced template functions.
 func New(deps *deps.Deps) *Namespace {
-	cache := &partialCache{p: make(map[partialCacheKey]any)}
+	// This lazycache was introduced in Hugo 0.111.0.
+	// We're going to expand and consolidate all memory caches in Hugo using this,
+	// so just set a high limit for now.
+	lru := lazycache.New(lazycache.Options[string, includeResult]{MaxEntries: 1000})
+
+	cache := &partialCache{cache: lru}
 	deps.BuildStartListeners.Add(
-		func() {
+		func(...any) bool {
 			cache.clear()
+			return false
 		})
 
 	return &Namespace{
@@ -103,21 +116,45 @@ func (c *contextWrapper) Set(in any) string {
 // A string if the partial is a text/template, or template.HTML when html/template.
 // Note that ctx is provided by Hugo, not the end user.
 func (ns *Namespace) Include(ctx context.Context, name string, contextList ...any) (any, error) {
-	name, result, err := ns.include(ctx, name, contextList...)
-	if err != nil {
-		return result, err
+	res := ns.includWithTimeout(ctx, name, contextList...)
+	if res.err != nil {
+		return nil, res.err
 	}
 
 	if ns.deps.Metrics != nil {
-		ns.deps.Metrics.TrackValue(name, result, false)
+		ns.deps.Metrics.TrackValue(res.name, res.result, false)
 	}
 
-	return result, nil
+	return res.result, nil
+}
+
+func (ns *Namespace) includWithTimeout(ctx context.Context, name string, dataList ...any) includeResult {
+	// Create a new context with a timeout not connected to the incoming context.
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), ns.deps.Conf.Timeout())
+	defer cancel()
+
+	res := make(chan includeResult, 1)
+
+	go func() {
+		res <- ns.include(ctx, name, dataList...)
+	}()
+
+	select {
+	case r := <-res:
+		return r
+	case <-timeoutCtx.Done():
+		err := timeoutCtx.Err()
+		if err == context.DeadlineExceeded {
+			//lint:ignore ST1005 end user message.
+			err = fmt.Errorf("partial %q timed out after %s. This is most likely due to infinite recursion. If this is just a slow template, you can try to increase the 'timeout' config setting.", name, ns.deps.Conf.Timeout())
+		}
+		return includeResult{err: err}
+	}
 }
 
 // include is a helper function that lookups and executes the named partial.
 // Returns the final template name and the rendered output.
-func (ns *Namespace) include(ctx context.Context, name string, dataList ...any) (string, any, error) {
+func (ns *Namespace) include(ctx context.Context, name string, dataList ...any) includeResult {
 	var data any
 	if len(dataList) > 0 {
 		data = dataList[0]
@@ -137,7 +174,7 @@ func (ns *Namespace) include(ctx context.Context, name string, dataList ...any) 
 	}
 
 	if !found {
-		return "", "", fmt.Errorf("partial %q not found", name)
+		return includeResult{err: fmt.Errorf("partial %q not found", name)}
 	}
 
 	var info tpl.ParseInfo
@@ -156,7 +193,7 @@ func (ns *Namespace) include(ctx context.Context, name string, dataList ...any) 
 		}
 
 		// We don't care about any template output.
-		w = ioutil.Discard
+		w = io.Discard
 	} else {
 		b := bp.GetBuffer()
 		defer bp.PutBuffer(b)
@@ -164,7 +201,7 @@ func (ns *Namespace) include(ctx context.Context, name string, dataList ...any) 
 	}
 
 	if err := ns.deps.Tmpl().ExecuteWithContext(ctx, templ, w, data); err != nil {
-		return "", nil, err
+		return includeResult{err: err}
 	}
 
 	var result any
@@ -177,101 +214,53 @@ func (ns *Namespace) include(ctx context.Context, name string, dataList ...any) 
 		result = template.HTML(w.(fmt.Stringer).String())
 	}
 
-	return templ.Name(), result, nil
+	return includeResult{
+		name:   templ.Name(),
+		result: result,
+	}
 }
 
 // IncludeCached executes and caches partial templates.  The cache is created with name+variants as the key.
 // Note that ctx is provided by Hugo, not the end user.
 func (ns *Namespace) IncludeCached(ctx context.Context, name string, context any, variants ...any) (any, error) {
-	key, err := createKey(name, variants...)
+	start := time.Now()
+	key := partialCacheKey{
+		Name:     name,
+		Variants: variants,
+	}
+	depsManagerIn := tpl.Context.GetDependencyManagerInCurrentScope(ctx)
+
+	r, found, err := ns.cachedPartials.cache.GetOrCreate(key.Key(), func(string) (includeResult, error) {
+		var depsManagerShared identity.Manager
+		if ns.deps.Conf.Watching() {
+			// We need to create a shared dependency manager to pass downwards
+			// and add those same dependencies to any cached invocation of this partial.
+			depsManagerShared = identity.NewManager("partials")
+			ctx = tpl.Context.DependencyManagerScopedProvider.Set(ctx, depsManagerShared.(identity.DependencyManagerScopedProvider))
+		}
+		r := ns.includWithTimeout(ctx, key.Name, context)
+		if ns.deps.Conf.Watching() {
+			r.mangager = depsManagerShared
+		}
+		return r, r.err
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	result, err := ns.getOrCreate(ctx, key, context)
-	if err == errUnHashable {
-		// Try one more
-		key.variant = helpers.HashString(key.variant)
-		result, err = ns.getOrCreate(ctx, key, context)
-	}
-
-	return result, err
-}
-
-func createKey(name string, variants ...any) (partialCacheKey, error) {
-	var variant any
-
-	if len(variants) > 1 {
-		variant = helpers.HashString(variants...)
-	} else if len(variants) == 1 {
-		variant = variants[0]
-		t := reflect.TypeOf(variant)
-		switch t.Kind() {
-		// This isn't an exhaustive list of unhashable types.
-		// There may be structs with slices,
-		// but that should be very rare. We do recover from that situation
-		// below.
-		case reflect.Slice, reflect.Array, reflect.Map:
-			variant = helpers.HashString(variant)
-		}
-	}
-
-	return partialCacheKey{name: name, variant: variant}, nil
-}
-
-var errUnHashable = errors.New("unhashable")
-
-func (ns *Namespace) getOrCreate(ctx context.Context, key partialCacheKey, context any) (result any, err error) {
-	start := time.Now()
-	defer func() {
-		if r := recover(); r != nil {
-			err = r.(error)
-			if strings.Contains(err.Error(), "unhashable type") {
-				ns.cachedPartials.RUnlock()
-				err = errUnHashable
-			}
-		}
-	}()
-
-	ns.cachedPartials.RLock()
-	p, ok := ns.cachedPartials.p[key]
-	ns.cachedPartials.RUnlock()
-
-	if ok {
-		if ns.deps.Metrics != nil {
-			ns.deps.Metrics.TrackValue(key.templateName(), p, true)
+	if ns.deps.Metrics != nil {
+		if found {
 			// The templates that gets executed is measured in Execute.
 			// We need to track the time spent in the cache to
 			// get the totals correct.
 			ns.deps.Metrics.MeasureSince(key.templateName(), start)
-
 		}
-		return p, nil
+		ns.deps.Metrics.TrackValue(key.templateName(), r.result, found)
 	}
 
-	// This needs to be done outside the lock.
-	// See #9588
-	_, p, err = ns.include(ctx, key.name, context)
-	if err != nil {
-		return nil, err
+	if r.mangager != nil && depsManagerIn != nil {
+		depsManagerIn.AddIdentity(r.mangager)
 	}
 
-	ns.cachedPartials.Lock()
-	defer ns.cachedPartials.Unlock()
-	// Double-check.
-	if p2, ok := ns.cachedPartials.p[key]; ok {
-		if ns.deps.Metrics != nil {
-			ns.deps.Metrics.TrackValue(key.templateName(), p, true)
-			ns.deps.Metrics.MeasureSince(key.templateName(), start)
-		}
-		return p2, nil
-
-	}
-	if ns.deps.Metrics != nil {
-		ns.deps.Metrics.TrackValue(key.templateName(), p, false)
-	}
-
-	ns.cachedPartials.p[key] = p
-
-	return p, nil
+	return r.result, nil
 }

@@ -15,8 +15,10 @@
 package templates
 
 import (
+	"context"
 	"fmt"
 
+	"github.com/gohugoio/hugo/common/paths"
 	"github.com/gohugoio/hugo/helpers"
 	"github.com/gohugoio/hugo/resources"
 	"github.com/gohugoio/hugo/resources/internal"
@@ -33,7 +35,7 @@ type Client struct {
 // New creates a new Client with the given specification.
 func New(rs *resources.Spec, t tpl.TemplatesProvider) *Client {
 	if rs == nil {
-		panic("must provice a resource Spec")
+		panic("must provide a resource Spec")
 	}
 	if t == nil {
 		panic("must provide a template provider")
@@ -61,13 +63,13 @@ func (t *executeAsTemplateTransform) Transform(ctx *resources.ResourceTransforma
 
 	ctx.OutPath = t.targetPath
 
-	return t.t.Tmpl().Execute(templ, ctx.To, t.data)
+	return t.t.Tmpl().ExecuteWithContext(ctx.Ctx, templ, ctx.To, t.data)
 }
 
-func (c *Client) ExecuteAsTemplate(res resources.ResourceTransformer, targetPath string, data any) (resource.Resource, error) {
-	return res.Transform(&executeAsTemplateTransform{
+func (c *Client) ExecuteAsTemplate(ctx context.Context, res resources.ResourceTransformer, targetPath string, data any) (resource.Resource, error) {
+	return res.TransformWithContext(ctx, &executeAsTemplateTransform{
 		rs:         c.rs,
-		targetPath: helpers.ToSlashTrimLeading(targetPath),
+		targetPath: paths.ToSlashTrimLeading(targetPath),
 		t:          c.t,
 		data:       data,
 	})

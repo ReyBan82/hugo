@@ -15,7 +15,6 @@ package hugio
 
 import (
 	"io"
-	"io/ioutil"
 )
 
 // As implemented by strings.Builder.
@@ -63,7 +62,7 @@ func ToWriteCloser(w io.Writer) io.WriteCloser {
 		io.Closer
 	}{
 		w,
-		ioutil.NopCloser(nil),
+		io.NopCloser(nil),
 	}
 }
 
@@ -79,6 +78,36 @@ func ToReadCloser(r io.Reader) io.ReadCloser {
 		io.Closer
 	}{
 		r,
-		ioutil.NopCloser(nil),
+		io.NopCloser(nil),
 	}
+}
+
+type ReadWriteCloser interface {
+	io.Reader
+	io.Writer
+	io.Closer
+}
+
+// PipeReadWriteCloser is a convenience type to create a pipe with a ReadCloser and a WriteCloser.
+type PipeReadWriteCloser struct {
+	*io.PipeReader
+	*io.PipeWriter
+}
+
+// NewPipeReadWriteCloser creates a new PipeReadWriteCloser.
+func NewPipeReadWriteCloser() PipeReadWriteCloser {
+	pr, pw := io.Pipe()
+	return PipeReadWriteCloser{pr, pw}
+}
+
+func (c PipeReadWriteCloser) Close() (err error) {
+	if err = c.PipeReader.Close(); err != nil {
+		return
+	}
+	err = c.PipeWriter.Close()
+	return
+}
+
+func (c PipeReadWriteCloser) WriteString(s string) (int, error) {
+	return c.PipeWriter.Write([]byte(s))
 }

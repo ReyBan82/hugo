@@ -1,3 +1,5 @@
+>**Note:** We would apprecitate if you hold on with any big refactorings (like renaming deprecated Go packages), mainly because of potential for extra merge work for future coming in in the near future.
+
 # Contributing to Hugo
 
 We welcome contributions to Hugo of any kind including documentation, themes,
@@ -119,8 +121,6 @@ git clone https://github.com/gohugoio/hugo.git
 cd hugo
 go install
 ```
-
->Note: Some Go tools may not be fully updated to support Go Modules yet. One example would be LiteIDE. Follow [this workaround](https://github.com/visualfc/liteide/issues/986#issuecomment-428117702) for how to continue to work with Hugo below `GOPATH`.
 
 For some convenient build and test targets, you also will want to install Mage:
 

@@ -1,4 +1,4 @@
-// Copyright 2022 The Hugo Authors. All rights reserved.
+// Copyright 2024 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,9 +15,9 @@ package codeblocks
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/gohugoio/hugo/common/herrors"
 	htext "github.com/gohugoio/hugo/common/text"
@@ -43,11 +43,6 @@ func New() goldmark.Extender {
 }
 
 func (e *codeBlocksExtension) Extend(m goldmark.Markdown) {
-	m.Parser().AddOptions(
-		parser.WithASTTransformers(
-			util.Prioritized(&Transformer{}, 100),
-		),
-	)
 	m.Renderer().AddOptions(renderer.WithNodeRenderers(
 		util.Prioritized(newHTMLRenderer(), 100),
 	))
@@ -59,7 +54,7 @@ func newHTMLRenderer() renderer.NodeRenderer {
 }
 
 func (r *htmlRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
-	reg.Register(KindCodeBlock, r.renderCodeBlock)
+	reg.Register(ast.KindFencedCodeBlock, r.renderCodeBlock)
 }
 
 func (r *htmlRenderer) renderCodeBlock(w util.BufWriter, src []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
@@ -69,28 +64,29 @@ func (r *htmlRenderer) renderCodeBlock(w util.BufWriter, src []byte, node ast.No
 		return ast.WalkContinue, nil
 	}
 
-	n := node.(*codeBlock)
-	lang := getLang(n.b, src)
+	n := node.(*ast.FencedCodeBlock)
+
+	lang := getLang(n, src)
 	renderer := ctx.RenderContext().GetRenderer(hooks.CodeBlockRendererType, lang)
 	if renderer == nil {
 		return ast.WalkStop, fmt.Errorf("no code renderer found for %q", lang)
 	}
 
-	ordinal := n.ordinal
+	ordinal := ctx.GetAndIncrementOrdinal(ast.KindFencedCodeBlock)
 
 	var buff bytes.Buffer
 
-	l := n.b.Lines().Len()
+	l := n.Lines().Len()
 	for i := 0; i < l; i++ {
-		line := n.b.Lines().At(i)
+		line := n.Lines().At(i)
 		buff.Write(line.Value(src))
 	}
 
 	s := htext.Chomp(buff.String())
 
 	var info []byte
-	if n.b.Info != nil {
-		info = n.b.Info.Segment.Value(src)
+	if n.Info != nil {
+		info = n.Info.Segment.Value(src)
 	}
 
 	attrtp := attributes.AttributesOwnerCodeBlockCustom
@@ -100,60 +96,38 @@ func (r *htmlRenderer) renderCodeBlock(w util.BufWriter, src []byte, node ast.No
 		attrtp = attributes.AttributesOwnerCodeBlockChroma
 	}
 
-	// IsDefaultCodeBlockRendererProvider
-	attrs := getAttributes(n.b, info)
-	cbctx := &codeBlockContext{
-		page:             ctx.DocumentContext().Document,
-		lang:             lang,
-		code:             s,
-		ordinal:          ordinal,
-		AttributesHolder: attributes.New(attrs, attrtp),
+	attrs, attrStr, err := getAttributes(n, info)
+	if err != nil {
+		return ast.WalkStop, &herrors.TextSegmentError{Err: err, Segment: attrStr}
 	}
 
-	cbctx.createPos = func() htext.Position {
-		if resolver, ok := renderer.(hooks.ElementPositionResolver); ok {
-			return resolver.ResolvePosition(cbctx)
-		}
-		return htext.Position{
-			Filename:     ctx.DocumentContext().Filename,
-			LineNumber:   1,
-			ColumnNumber: 1,
-		}
+	cbctx := &codeBlockContext{
+		BaseContext:      render.NewBaseContext(ctx, renderer, node, src, func() []byte { return []byte(s) }, ordinal),
+		lang:             lang,
+		code:             s,
+		AttributesHolder: attributes.New(attrs, attrtp),
 	}
 
 	cr := renderer.(hooks.CodeBlockRenderer)
 
-	err := cr.RenderCodeblock(
+	err = cr.RenderCodeblock(
+		ctx.RenderContext().Ctx,
 		w,
 		cbctx,
 	)
-
-	ctx.AddIdentity(cr)
-
 	if err != nil {
-		return ast.WalkContinue, herrors.NewFileErrorFromPos(err, cbctx.createPos())
+		return ast.WalkContinue, herrors.NewFileErrorFromPos(err, cbctx.Position())
 	}
 
 	return ast.WalkContinue, nil
 }
 
 type codeBlockContext struct {
-	page    any
-	lang    string
-	code    string
-	ordinal int
-
-	// This is only used in error situations and is expensive to create,
-	// to deleay creation until needed.
-	pos       htext.Position
-	posInit   sync.Once
-	createPos func() htext.Position
+	hooks.BaseContext
+	lang string
+	code string
 
 	*attributes.AttributesHolder
-}
-
-func (c *codeBlockContext) Page() any {
-	return c.page
 }
 
 func (c *codeBlockContext) Type() string {
@@ -164,47 +138,42 @@ func (c *codeBlockContext) Inner() string {
 	return c.code
 }
 
-func (c *codeBlockContext) Ordinal() int {
-	return c.ordinal
-}
-
-func (c *codeBlockContext) Position() htext.Position {
-	c.posInit.Do(func() {
-		c.pos = c.createPos()
-	})
-	return c.pos
-}
-
 func getLang(node *ast.FencedCodeBlock, src []byte) string {
 	langWithAttributes := string(node.Language(src))
 	lang, _, _ := strings.Cut(langWithAttributes, "{")
 	return lang
 }
 
-func getAttributes(node *ast.FencedCodeBlock, infostr []byte) []ast.Attribute {
+func getAttributes(node *ast.FencedCodeBlock, infostr []byte) ([]ast.Attribute, string, error) {
 	if node.Attributes() != nil {
-		return node.Attributes()
+		return node.Attributes(), "", nil
 	}
 	if infostr != nil {
 		attrStartIdx := -1
+		attrEndIdx := -1
 
 		for idx, char := range infostr {
-			if char == '{' {
+			if attrEndIdx == -1 && char == '{' {
 				attrStartIdx = idx
+			}
+			if attrStartIdx != -1 && char == '}' {
+				attrEndIdx = idx
 				break
 			}
 		}
 
-		if attrStartIdx != -1 {
+		if attrStartIdx != -1 && attrEndIdx != -1 {
 			n := ast.NewTextBlock() // dummy node for storing attributes
-			attrStr := infostr[attrStartIdx:]
+			attrStr := infostr[attrStartIdx : attrEndIdx+1]
 			if attrs, hasAttr := parser.ParseAttributes(text.NewReader(attrStr)); hasAttr {
 				for _, attr := range attrs {
 					n.SetAttribute(attr.Name, attr.Value)
 				}
-				return n.Attributes()
+				return n.Attributes(), "", nil
+			} else {
+				return nil, string(attrStr), errors.New("failed to parse Markdown attributes; you may need to quote the values")
 			}
 		}
 	}
-	return nil
+	return nil, "", nil
 }

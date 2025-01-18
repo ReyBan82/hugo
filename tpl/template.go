@@ -11,6 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package tpl contains template functions and related types.
 package tpl
 
 import (
@@ -19,9 +20,14 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"unicode"
 
 	bp "github.com/gohugoio/hugo/bufferpool"
+	"github.com/gohugoio/hugo/common/hcontext"
+	"github.com/gohugoio/hugo/identity"
+	"github.com/gohugoio/hugo/langs"
+	"github.com/gohugoio/hugo/output/layouts"
 
 	"github.com/gohugoio/hugo/output"
 
@@ -34,7 +40,6 @@ type TemplateManager interface {
 	TemplateHandler
 	TemplateFuncGetter
 	AddTemplate(name, tpl string) error
-	MarkReady() error
 }
 
 // TemplateVariants describes the possible variants of a template.
@@ -55,13 +60,23 @@ type UnusedTemplatesProvider interface {
 	UnusedTemplates() []FileInfo
 }
 
+// TemplateHandlers holds the templates needed by Hugo.
+type TemplateHandlers struct {
+	Tmpl    TemplateHandler
+	TxtTmpl TemplateParseFinder
+}
+
+type TemplateExecutor interface {
+	ExecuteWithContext(ctx context.Context, t Template, wr io.Writer, data any) error
+}
+
 // TemplateHandler finds and executes templates.
 type TemplateHandler interface {
 	TemplateFinder
-	Execute(t Template, wr io.Writer, data any) error
-	ExecuteWithContext(ctx context.Context, t Template, wr io.Writer, data any) error
-	LookupLayout(d output.LayoutDescriptor, f output.Format) (Template, bool, error)
+	TemplateExecutor
+	LookupLayout(d layouts.LayoutDescriptor, f output.Format) (Template, bool, error)
 	HasTemplate(name string) bool
+	GetIdentity(name string) (identity.Identity, bool)
 }
 
 type TemplateLookup interface {
@@ -88,6 +103,27 @@ type Template interface {
 	Prepare() (*texttemplate.Template, error)
 }
 
+// AddIdentity checks if t is an identity.Identity and returns it if so.
+// Else it wraps it in a templateIdentity using its name as the base.
+func AddIdentity(t Template) Template {
+	if _, ok := t.(identity.IdentityProvider); ok {
+		return t
+	}
+	return templateIdentityProvider{
+		Template: t,
+		id:       identity.StringIdentity(t.Name()),
+	}
+}
+
+type templateIdentityProvider struct {
+	Template
+	id identity.Identity
+}
+
+func (t templateIdentityProvider) GetIdentity() identity.Identity {
+	return t.id
+}
+
 // TemplateParser is used to parse ad-hoc templates, e.g. in the Resource chain.
 type TemplateParser interface {
 	Parse(name, tpl string) (Template, error)
@@ -104,37 +140,10 @@ type TemplateDebugger interface {
 	Debug()
 }
 
-// templateInfo wraps a Template with some additional information.
-type templateInfo struct {
-	Template
-	Info
-}
-
-// templateInfo wraps a Template with some additional information.
-type templateInfoManager struct {
-	Template
-	InfoManager
-}
-
 // TemplatesProvider as implemented by deps.Deps.
 type TemplatesProvider interface {
 	Tmpl() TemplateHandler
 	TextTmpl() TemplateParseFinder
-}
-
-// WithInfo wraps the info in a template.
-func WithInfo(templ Template, info Info) Template {
-	if manager, ok := info.(InfoManager); ok {
-		return &templateInfoManager{
-			Template:    templ,
-			InfoManager: manager,
-		}
-	}
-
-	return &templateInfo{
-		Template: templ,
-		Info:     info,
-	}
 }
 
 var baseOfRe = regexp.MustCompile("template: (.*?):")
@@ -152,29 +161,53 @@ type TemplateFuncGetter interface {
 	GetFunc(name string) (reflect.Value, bool)
 }
 
-// GetDataFromContext returns the template data context (usually .Page) from ctx if set.
-// NOte: This is not fully implemented yet.
-func GetDataFromContext(ctx context.Context) any {
-	return ctx.Value(texttemplate.DataContextKey)
+type RenderingContext struct {
+	Site       site
+	SiteOutIdx int
 }
 
-func GetHasLockFromContext(ctx context.Context) bool {
-	if v := ctx.Value(texttemplate.HasLockContextKey); v != nil {
-		return v.(bool)
+type contextKey string
+
+// Context manages values passed in the context to templates.
+var Context = struct {
+	DependencyManagerScopedProvider    hcontext.ContextDispatcher[identity.DependencyManagerScopedProvider]
+	GetDependencyManagerInCurrentScope func(context.Context) identity.Manager
+	DependencyScope                    hcontext.ContextDispatcher[int]
+	Page                               hcontext.ContextDispatcher[page]
+	IsInGoldmark                       hcontext.ContextDispatcher[bool]
+}{
+	DependencyManagerScopedProvider: hcontext.NewContextDispatcher[identity.DependencyManagerScopedProvider](contextKey("DependencyManagerScopedProvider")),
+	DependencyScope:                 hcontext.NewContextDispatcher[int](contextKey("DependencyScope")),
+	Page:                            hcontext.NewContextDispatcher[page](contextKey("Page")),
+	IsInGoldmark:                    hcontext.NewContextDispatcher[bool](contextKey("IsInGoldmark")),
+}
+
+func init() {
+	Context.GetDependencyManagerInCurrentScope = func(ctx context.Context) identity.Manager {
+		idmsp := Context.DependencyManagerScopedProvider.Get(ctx)
+		if idmsp != nil {
+			return idmsp.GetDependencyManagerForScope(Context.DependencyScope.Get(ctx))
+		}
+		return nil
 	}
-	return false
 }
 
-func SetHasLockInContext(ctx context.Context, hasLock bool) context.Context {
-	return context.WithValue(ctx, texttemplate.HasLockContextKey, hasLock)
+type page interface {
+	IsNode() bool
 }
+
+type site interface {
+	Language() *langs.Language
+}
+
+const (
+	HugoDeferredTemplatePrefix = "__hdeferred/"
+	HugoDeferredTemplateSuffix = "__d="
+)
 
 const hugoNewLinePlaceholder = "___hugonl_"
 
-var (
-	stripHTMLReplacerPre = strings.NewReplacer("\n", " ", "</p>", hugoNewLinePlaceholder, "<br>", hugoNewLinePlaceholder, "<br />", hugoNewLinePlaceholder)
-	whitespaceRe         = regexp.MustCompile(`\s+`)
-)
+var stripHTMLReplacerPre = strings.NewReplacer("\n", " ", "</p>", hugoNewLinePlaceholder, "<br>", hugoNewLinePlaceholder, "<br />", hugoNewLinePlaceholder)
 
 // StripHTML strips out all HTML tags in s.
 func StripHTML(s string) string {
@@ -208,4 +241,14 @@ func StripHTML(s string) string {
 	}
 
 	return s
+}
+
+type DeferredExecution struct {
+	Mu           sync.Mutex
+	Ctx          context.Context
+	TemplateName string
+	Data         any
+
+	Executed bool
+	Result   string
 }

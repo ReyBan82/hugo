@@ -16,6 +16,10 @@ package goldmark
 import (
 	"bytes"
 
+	strikethroughAst "github.com/yuin/goldmark/extension/ast"
+
+	emojiAst "github.com/yuin/goldmark-emoji/ast"
+
 	"github.com/gohugoio/hugo/markup/tableofcontents"
 
 	"github.com/yuin/goldmark"
@@ -41,8 +45,8 @@ func (t *tocTransformer) Transform(n *ast.Document, reader text.Reader, pc parse
 	}
 
 	var (
-		toc         tableofcontents.Root
-		tocHeading  tableofcontents.Heading
+		toc         tableofcontents.Builder
+		tocHeading  = &tableofcontents.Heading{}
 		level       int
 		row         = -1
 		inHeading   bool
@@ -53,10 +57,10 @@ func (t *tocTransformer) Transform(n *ast.Document, reader text.Reader, pc parse
 		s := ast.WalkStatus(ast.WalkContinue)
 		if n.Kind() == ast.KindHeading {
 			if inHeading && !entering {
-				tocHeading.Text = headingText.String()
+				tocHeading.Title = headingText.String()
 				headingText.Reset()
 				toc.AddAt(tocHeading, row, level-1)
-				tocHeading = tableofcontents.Heading{}
+				tocHeading = &tableofcontents.Heading{}
 				inHeading = false
 				return s, nil
 			}
@@ -80,12 +84,15 @@ func (t *tocTransformer) Transform(n *ast.Document, reader text.Reader, pc parse
 			id, found := heading.AttributeString("id")
 			if found {
 				tocHeading.ID = string(id.([]byte))
+				tocHeading.Level = level
 			}
 		case
 			ast.KindCodeSpan,
 			ast.KindLink,
 			ast.KindImage,
-			ast.KindEmphasis:
+			ast.KindEmphasis,
+			strikethroughAst.KindStrikethrough,
+			emojiAst.KindEmoji:
 			err := t.r.Render(&headingText, reader.Source(), n)
 			if err != nil {
 				return s, err
@@ -106,7 +113,7 @@ func (t *tocTransformer) Transform(n *ast.Document, reader text.Reader, pc parse
 		return s, nil
 	})
 
-	pc.Set(tocResultKey, toc)
+	pc.Set(tocResultKey, toc.Build())
 }
 
 type tocExtension struct {

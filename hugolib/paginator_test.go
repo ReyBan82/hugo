@@ -24,8 +24,10 @@ import (
 func TestPaginator(t *testing.T) {
 	configFile := `
 baseURL = "https://example.com/foo/"
-paginate = 3
-paginatepath = "thepage"
+
+[pagination]
+pagerSize = 3
+path = "thepage"
 
 [languages.en]
 weight = 1
@@ -135,4 +137,51 @@ weight: %d
 	b.Assert(b.CheckExists("public/page/1/index.json/index.html"), qt.Equals, false)
 	b.Assert(b.CheckExists("public/page/1/index.json"), qt.Equals, false)
 	b.AssertFileContent("public/page/2/index.json", `JSON: 22: |/p11/index.json|/p12/index.json`)
+}
+
+// Issue 10802
+func TestPaginatorEmptyPageGroups(t *testing.T) {
+	t.Parallel()
+
+	files := `
+-- config.toml --
+baseURL = "https://example.com/"
+-- content/p1.md --
+-- content/p2.md --
+-- layouts/index.html --
+{{ $empty := site.RegularPages | complement site.RegularPages }}
+Len: {{ len $empty }}: Type: {{ printf "%T" $empty }}
+{{ $pgs := $empty.GroupByPublishDate "January 2006" }}
+{{ $pag := .Paginate $pgs }}
+Len Pag: {{ len $pag.Pages }}
+`
+	b := Test(t, files)
+
+	b.AssertFileContent("public/index.html", "Len: 0", "Len Pag: 0")
+}
+
+func TestPaginatorNodePagesOnly(t *testing.T) {
+	files := `
+-- hugo.toml --
+[pagination]
+pagerSize = 1
+-- content/p1.md --
+-- layouts/_default/single.html --
+Paginator: {{ .Paginator }}
+`
+	b, err := TestE(t, files)
+	b.Assert(err, qt.IsNotNil)
+	b.Assert(err.Error(), qt.Contains, `error calling Paginator: pagination not supported for this page: kind: "page"`)
+}
+
+func TestNilPointerErrorMessage(t *testing.T) {
+	files := `
+-- hugo.toml --
+-- content/p1.md --
+-- layouts/_default/single.html --
+Home Filename: {{ site.Home.File.Filename }}
+`
+	b, err := TestE(t, files)
+	b.Assert(err, qt.IsNotNil)
+	b.Assert(err.Error(), qt.Contains, `_default/single.html:1:22: executing "_default/single.html" – File is nil; wrap it in if or with: {{ with site.Home.File }}{{ .Filename }}{{ end }}`)
 }

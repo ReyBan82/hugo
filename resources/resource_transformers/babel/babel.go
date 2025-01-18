@@ -17,7 +17,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -123,10 +122,10 @@ func (t *babelTransformation) Transform(ctx *resources.ResourceTransformationCtx
 	}
 
 	var configFile string
-	logger := t.rs.Logger
+	infol := t.rs.Logger.InfoCommand(binaryName)
+	infoW := loggers.LevelLoggerToWriter(infol)
 
 	var errBuf bytes.Buffer
-	infoW := loggers.LoggerToWriterWithPrefix(logger.Info(), "babel")
 
 	if t.options.Config != "" {
 		configFile = t.options.Config
@@ -141,7 +140,7 @@ func (t *babelTransformation) Transform(ctx *resources.ResourceTransformationCtx
 		configFile = t.rs.BaseFs.ResolveJSConfigFile(configFile)
 		if configFile == "" && t.options.Config != "" {
 			// Only fail if the user specified config file is not found.
-			return fmt.Errorf("babel config %q not found:", configFile)
+			return fmt.Errorf("babel config %q not found", configFile)
 		}
 	}
 
@@ -150,7 +149,7 @@ func (t *babelTransformation) Transform(ctx *resources.ResourceTransformationCtx
 	var cmdArgs []any
 
 	if configFile != "" {
-		logger.Infoln("babel: use config file", configFile)
+		infol.Logf("use config file %q", configFile)
 		cmdArgs = []any{"--config-file", configFile}
 	}
 
@@ -162,7 +161,7 @@ func (t *babelTransformation) Transform(ctx *resources.ResourceTransformationCtx
 	// Create compile into a real temp file:
 	// 1. separate stdout/stderr messages from babel (https://github.com/gohugoio/hugo/issues/8136)
 	// 2. allow generation and retrieval of external source map.
-	compileOutput, err := ioutil.TempFile("", "compileOut-*.js")
+	compileOutput, err := os.CreateTemp("", "compileOut-*.js")
 	if err != nil {
 		return err
 	}
@@ -171,24 +170,25 @@ func (t *babelTransformation) Transform(ctx *resources.ResourceTransformationCtx
 	stderr := io.MultiWriter(infoW, &errBuf)
 	cmdArgs = append(cmdArgs, hexec.WithStderr(stderr))
 	cmdArgs = append(cmdArgs, hexec.WithStdout(stderr))
-	cmdArgs = append(cmdArgs, hexec.WithEnviron(hugo.GetExecEnviron(t.rs.WorkingDir, t.rs.Cfg, t.rs.BaseFs.Assets.Fs)))
+	cmdArgs = append(cmdArgs, hexec.WithEnviron(hugo.GetExecEnviron(t.rs.Cfg.BaseConfig().WorkingDir, t.rs.Cfg, t.rs.BaseFs.Assets.Fs)))
 
-	defer os.Remove(compileOutput.Name())
+	defer func() {
+		compileOutput.Close()
+		os.Remove(compileOutput.Name())
+	}()
 
 	// ARGA [--no-install babel --config-file /private/var/folders/_g/j3j21hts4fn7__h04w2x8gb40000gn/T/hugo-test-babel812882892/babel.config.js --source-maps --filename=js/main2.js --out-file=/var/folders/_g/j3j21hts4fn7__h04w2x8gb40000gn/T/compileOut-2237820197.js]
 	//      [--no-install babel --config-file /private/var/folders/_g/j3j21hts4fn7__h04w2x8gb40000gn/T/hugo-test-babel332846848/babel.config.js --filename=js/main.js --out-file=/var/folders/_g/j3j21hts4fn7__h04w2x8gb40000gn/T/compileOut-1451390834.js 0x10304ee60 0x10304ed60 0x10304f060]
 	cmd, err := ex.Npx(binaryName, cmdArgs...)
-
 	if err != nil {
 		if hexec.IsNotFound(err) {
 			// This may be on a CI server etc. Will fall back to pre-built assets.
-			return herrors.ErrFeatureNotAvailable
+			return &herrors.FeatureNotAvailableError{Cause: err}
 		}
 		return err
 	}
 
 	stdin, err := cmd.StdinPipe()
-
 	if err != nil {
 		return err
 	}
@@ -201,12 +201,12 @@ func (t *babelTransformation) Transform(ctx *resources.ResourceTransformationCtx
 	err = cmd.Run()
 	if err != nil {
 		if hexec.IsNotFound(err) {
-			return herrors.ErrFeatureNotAvailable
+			return &herrors.FeatureNotAvailableError{Cause: err}
 		}
 		return fmt.Errorf(errBuf.String()+": %w", err)
 	}
 
-	content, err := ioutil.ReadAll(compileOutput)
+	content, err := io.ReadAll(compileOutput)
 	if err != nil {
 		return err
 	}
@@ -214,7 +214,7 @@ func (t *babelTransformation) Transform(ctx *resources.ResourceTransformationCtx
 	mapFile := compileOutput.Name() + ".map"
 	if _, err := os.Stat(mapFile); err == nil {
 		defer os.Remove(mapFile)
-		sourceMap, err := ioutil.ReadFile(mapFile)
+		sourceMap, err := os.ReadFile(mapFile)
 		if err != nil {
 			return err
 		}

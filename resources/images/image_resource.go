@@ -1,4 +1,4 @@
-// Copyright 2022 The Hugo Authors. All rights reserved.
+// Copyright 2024 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,16 +29,29 @@ type ImageResource interface {
 type ImageResourceOps interface {
 	// Height returns the height of the Image.
 	Height() int
+
 	// Width returns the width of the Image.
 	Width() int
+
+	// Process applies the given image processing options to the image.
+	Process(spec string) (ImageResource, error)
 
 	// Crop an image to match the given dimensions without resizing.
 	// You must provide both width and height.
 	// Use the anchor option to change the crop box anchor point.
 	//    {{ $image := $image.Crop "600x400" }}
 	Crop(spec string) (ImageResource, error)
+
+	// Fill scales the image to the smallest possible size that will cover the specified dimensions in spec,
+	// crops the resized image to the specified dimensions using the given anchor point.
+	// The spec is space delimited, e.g. `200x300 TopLeft`.
 	Fill(spec string) (ImageResource, error)
+
+	// Fit scales down the image using the given spec.
 	Fit(spec string) (ImageResource, error)
+
+	// Resize resizes the image to the given spec. If one of width or height is 0, the image aspect
+	// ratio is preserved.
 	Resize(spec string) (ImageResource, error)
 
 	// Filter applies one or more filters to an Image.
@@ -50,8 +63,8 @@ type ImageResourceOps interface {
 
 	// Colors returns a slice of the most dominant colors in an image
 	// using a simple histogram method.
-	Colors() ([]string, error)
+	Colors() ([]Color, error)
 
-	// Internal
+	// For internal use.
 	DecodeImage() (image.Image, error)
 }

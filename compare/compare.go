@@ -36,3 +36,32 @@ type ProbablyEqer interface {
 type Comparer interface {
 	Compare(other any) int
 }
+
+// Eq returns whether v1 is equal to v2.
+// It will use the Eqer interface if implemented, which
+// defines equals when two value are interchangeable
+// in the Hugo templates.
+func Eq(v1, v2 any) bool {
+	if v1 == nil || v2 == nil {
+		return v1 == v2
+	}
+
+	if eqer, ok := v1.(Eqer); ok {
+		return eqer.Eq(v2)
+	}
+
+	return v1 == v2
+}
+
+// ProbablyEq returns whether v1 is probably equal to v2.
+func ProbablyEq(v1, v2 any) bool {
+	if Eq(v1, v2) {
+		return true
+	}
+
+	if peqer, ok := v1.(ProbablyEqer); ok {
+		return peqer.ProbablyEq(v2)
+	}
+
+	return false
+}

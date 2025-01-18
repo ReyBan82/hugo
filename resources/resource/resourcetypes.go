@@ -14,7 +14,10 @@
 package resource
 
 import (
+	"context"
+
 	"github.com/gohugoio/hugo/common/maps"
+	"github.com/gohugoio/hugo/common/types"
 	"github.com/gohugoio/hugo/langs"
 	"github.com/gohugoio/hugo/media"
 
@@ -40,6 +43,9 @@ type OriginProvider interface {
 
 // NewResourceError creates a new ResourceError.
 func NewResourceError(err error, data any) ResourceError {
+	if data == nil {
+		data = map[string]any{}
+	}
 	return &resourceError{
 		error: err,
 		data:  data,
@@ -62,20 +68,22 @@ type ResourceError interface {
 	ResourceDataProvider
 }
 
-// ErrProvider provides an Err.
-type ErrProvider interface {
-	Err() ResourceError
-}
-
 // Resource represents a linkable resource, i.e. a content page, image etc.
 type Resource interface {
+	ResourceWithoutMeta
+	ResourceMetaProvider
+}
+
+type ResourceWithoutMeta interface {
 	ResourceTypeProvider
 	MediaTypeProvider
 	ResourceLinksProvider
-	ResourceMetaProvider
-	ResourceParamsProvider
 	ResourceDataProvider
-	ErrProvider
+}
+
+type ResourceWrapper interface {
+	UnwrappedResource() Resource
+	WrapResource(Resource) ResourceWrapper
 }
 
 type ResourceTypeProvider interface {
@@ -103,7 +111,19 @@ type ResourceLinksProvider interface {
 	RelPermalink() string
 }
 
+// ResourceMetaProvider provides metadata about a resource.
 type ResourceMetaProvider interface {
+	ResourceNameTitleProvider
+	ResourceParamsProvider
+}
+
+type WithResourceMetaProvider interface {
+	// WithResourceMeta creates a new Resource with the given metadata.
+	// For internal use.
+	WithResourceMeta(ResourceMetaProvider) Resource
+}
+
+type ResourceNameTitleProvider interface {
 	// Name is the logical name of this resource. This can be set in the front matter
 	// metadata for this resource. If not set, Hugo will assign a value.
 	// This will in most cases be the base filename.
@@ -116,6 +136,12 @@ type ResourceMetaProvider interface {
 	Title() string
 }
 
+type NameNormalizedProvider interface {
+	// NameNormalized is the normalized name of this resource.
+	// For internal use (for now).
+	NameNormalized() string
+}
+
 type ResourceParamsProvider interface {
 	// Params set in front matter for this resource.
 	Params() maps.Params
@@ -123,7 +149,7 @@ type ResourceParamsProvider interface {
 
 type ResourceDataProvider interface {
 	// Resource specific data set by Hugo.
-	// One example would be.Data.Digest for fingerprinted resources.
+	// One example would be .Data.Integrity for fingerprinted resources.
 	Data() any
 }
 
@@ -139,7 +165,28 @@ type ResourcesLanguageMerger interface {
 
 // Identifier identifies a resource.
 type Identifier interface {
+	// Key is mostly for internal use and should be considered opaque.
+	// This value may change between Hugo versions.
 	Key() string
+}
+
+// TransientIdentifier identifies a transient resource.
+type TransientIdentifier interface {
+	// TransientKey is mostly for internal use and should be considered opaque.
+	// This value is implemented by transient resources where pointers may be short lived and
+	// not suitable for use as a map keys.
+	TransientKey() string
+}
+
+// WeightProvider provides a weight.
+type WeightProvider interface {
+	Weight() int
+}
+
+// Weight0Provider provides a weight that's considered before the WeightProvider in sorting.
+// This allows the weight set on a given term to win.
+type Weight0Provider interface {
+	Weight0() int
 }
 
 // ContentResource represents a Resource that provides a way to get to its content.
@@ -159,12 +206,8 @@ type ContentProvider interface {
 	// * Page: template.HTML
 	// * JSON: String
 	// * Etc.
-	Content() (any, error)
+	Content(context.Context) (any, error)
 }
-
-// OpenReadSeekCloser allows setting some other way (than reading from a filesystem)
-// to open or create a ReadSeekCloser.
-type OpenReadSeekCloser func() (hugio.ReadSeekCloser, error)
 
 // ReadSeekCloserResource is a Resource that supports loading its content.
 type ReadSeekCloserResource interface {
@@ -175,7 +218,7 @@ type ReadSeekCloserResource interface {
 // LengthProvider is a Resource that provides a length
 // (typically the length of the content).
 type LengthProvider interface {
-	Len() int
+	Len(context.Context) int
 }
 
 // LanguageProvider is a Resource in a language.
@@ -186,6 +229,54 @@ type LanguageProvider interface {
 // TranslationKeyProvider connects translations of the same Resource.
 type TranslationKeyProvider interface {
 	TranslationKey() string
+}
+
+// Staler controls stale state of a Resource. A stale resource should be discarded.
+type Staler interface {
+	StaleMarker
+	StaleInfo
+}
+
+// StaleMarker marks a Resource as stale.
+type StaleMarker interface {
+	MarkStale()
+}
+
+// StaleInfo tells if a resource is marked as stale.
+type StaleInfo interface {
+	StaleVersion() uint32
+}
+
+// StaleVersion returns the StaleVersion for the given os,
+// or 0 if not set.
+func StaleVersion(os any) uint32 {
+	if s, ok := os.(StaleInfo); ok {
+		return s.StaleVersion()
+	}
+	return 0
+}
+
+// StaleVersionSum calculates the sum of the StaleVersionSum for the given oss.
+func StaleVersionSum(oss ...any) uint32 {
+	var version uint32
+	for _, o := range oss {
+		if s, ok := o.(StaleInfo); ok && s.StaleVersion() > 0 {
+			version += s.StaleVersion()
+		}
+	}
+	return version
+}
+
+// MarkStale will mark any of the oses as stale, if possible.
+func MarkStale(os ...any) {
+	for _, o := range os {
+		if types.IsNil(o) {
+			continue
+		}
+		if s, ok := o.(StaleMarker); ok {
+			s.MarkStale()
+		}
+	}
 }
 
 // UnmarshableResource represents a Resource that can be unmarshaled to some other format.
@@ -211,14 +302,10 @@ func NewResourceTypesProvider(mediaType media.Type, resourceType string) Resourc
 	return resourceTypesHolder{mediaType: mediaType, resourceType: resourceType}
 }
 
-type languageHolder struct {
-	lang *langs.Language
-}
-
-func (l languageHolder) Language() *langs.Language {
-	return l.lang
-}
-
-func NewLanguageProvider(lang *langs.Language) LanguageProvider {
-	return languageHolder{lang: lang}
+// NameNormalizedOrName returns the normalized name if available, otherwise the name.
+func NameNormalizedOrName(r Resource) string {
+	if nn, ok := r.(NameNormalizedProvider); ok {
+		return nn.NameNormalized()
+	}
+	return r.Name()
 }

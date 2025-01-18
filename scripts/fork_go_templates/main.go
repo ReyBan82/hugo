@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -17,7 +16,8 @@ import (
 )
 
 func main() {
-	// The current is built with be7068fb0804f661515c678bee9224b90b32869a text/template: correct assignment, not declaration, in range
+	// The current is built with  6885bad7dd86880be6929c02085e5c7a67ff2887 go1.23.0
+	// TODO(bep) preserve the staticcheck.conf file.
 	fmt.Println("Forking ...")
 	defer fmt.Println("Done ...")
 
@@ -163,11 +163,15 @@ func copyGoPackage(dst, src string) {
 
 func doWithGoFiles(dir string,
 	rewrite func(name string),
-	transform func(name, in string) string) {
+	transform func(name, in string) string,
+) {
 	if rewrite == nil && transform == nil {
 		return
 	}
 	must(filepath.Walk(filepath.Join(forkRoot, dir), func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
 		if info.IsDir() {
 			return nil
 		}
@@ -186,7 +190,7 @@ func doWithGoFiles(dir string,
 			return nil
 		}
 
-		data, err := ioutil.ReadFile(path)
+		data, err := os.ReadFile(path)
 		must(err)
 		f, err := os.Create(path)
 		must(err)

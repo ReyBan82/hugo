@@ -22,16 +22,15 @@ import (
 	"github.com/gohugoio/hugo/htesting"
 
 	"github.com/gohugoio/hugo/identity"
-	"github.com/gohugoio/hugo/markup/internal"
 
 	"github.com/gohugoio/hugo/markup/converter"
+	"github.com/gohugoio/hugo/markup/internal"
 )
 
 // Provider is the package entry point.
 var Provider converter.ProviderProvider = provider{}
 
-type provider struct {
-}
+type provider struct{}
 
 func (p provider) New(cfg converter.ProviderConfig) (converter.Provider, error) {
 	return converter.NewProvider("rst", func(ctx converter.DocumentContext) (converter.Converter, error) {
@@ -47,7 +46,7 @@ type rstConverter struct {
 	cfg converter.ProviderConfig
 }
 
-func (c *rstConverter) Convert(ctx converter.RenderContext) (converter.Result, error) {
+func (c *rstConverter) Convert(ctx converter.RenderContext) (converter.ResultRender, error) {
 	b, err := c.getRstContent(ctx.Src, c.ctx)
 	if err != nil {
 		return nil, err

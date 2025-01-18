@@ -31,7 +31,6 @@ import (
 func (c Caches) Prune() (int, error) {
 	counter := 0
 	for k, cache := range c {
-
 		count, err := cache.Prune(false)
 
 		counter += count
@@ -54,6 +53,9 @@ func (c *Cache) Prune(force bool) (int, error) {
 	if c.pruneAllRootDir != "" {
 		return c.pruneRootDir(force)
 	}
+	if err := c.init(); err != nil {
+		return 0, err
+	}
 
 	counter := 0
 
@@ -70,11 +72,16 @@ func (c *Cache) Prune(force bool) (int, error) {
 				// This cache dir may not exist.
 				return nil
 			}
-			defer f.Close()
 			_, err = f.Readdirnames(1)
+			f.Close()
 			if err == io.EOF {
 				// Empty dir.
-				err = c.Fs.Remove(name)
+				if name == "." {
+					// e.g. /_gen/images -- keep it even if empty.
+					err = nil
+				} else {
+					err = c.Fs.Remove(name)
+				}
 			}
 
 			if err != nil && !herrors.IsNotExist(err) {
@@ -111,6 +118,9 @@ func (c *Cache) Prune(force bool) (int, error) {
 }
 
 func (c *Cache) pruneRootDir(force bool) (int, error) {
+	if err := c.init(); err != nil {
+		return 0, err
+	}
 	info, err := c.Fs.Stat(c.pruneAllRootDir)
 	if err != nil {
 		if herrors.IsNotExist(err) {

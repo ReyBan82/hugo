@@ -21,9 +21,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash"
-	"html/template"
 	"io"
 
+	"github.com/gohugoio/hugo/common/constants"
 	"github.com/gohugoio/hugo/resources/internal"
 
 	"github.com/gohugoio/hugo/resources"
@@ -48,7 +48,7 @@ type fingerprintTransformation struct {
 }
 
 func (t *fingerprintTransformation) Key() internal.ResourceTransformationKey {
-	return internal.NewResourceTransformationKey("fingerprint", t.algo)
+	return internal.NewResourceTransformationKey(constants.ResourceTransformationFingerprint, t.algo)
 }
 
 // Transform creates a MD5 hash of the Resource content and inserts that hash before
@@ -91,7 +91,7 @@ func newHash(algo string) (hash.Hash, error) {
 	case "sha512":
 		return sha512.New(), nil
 	default:
-		return nil, fmt.Errorf("unsupported crypto algo: %q, use either md5, sha256, sha384 or sha512", algo)
+		return nil, fmt.Errorf("unsupported hash algorithm: %q, use either md5, sha256, sha384 or sha512", algo)
 	}
 }
 
@@ -109,9 +109,9 @@ func (c *Client) Fingerprint(res resources.ResourceTransformer, algo string) (re
 	return res.Transform(&fingerprintTransformation{algo: algo})
 }
 
-func integrity(algo string, sum []byte) template.HTMLAttr {
+func integrity(algo string, sum []byte) string {
 	encoded := base64.StdEncoding.EncodeToString(sum)
-	return template.HTMLAttr(algo + "-" + encoded)
+	return algo + "-" + encoded
 }
 
 func digest(h hash.Hash) ([]byte, error) {
